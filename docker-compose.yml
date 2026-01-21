@@ -1,0 +1,99 @@
+services:
+  ingestion-service:
+    build: ./ingestion_service
+    container_name: ingestion-service
+    ports:
+      - "8001:8000"
+    env_file:
+      - .env
+    volumes:
+      - chroma_data:/chroma_data
+    depends_on:
+      - docker-model-runner
+    environment:
+      SEARCH_SERVICE_URL: ${SEARCH_SERVICE_URL}
+    restart: unless-stopped
+    networks: [rag-net]
+
+  docker-model-runner:
+    provider:
+      type: model
+      options:
+        model: ${MODEL_EMBED}
+
+  query-service:
+    build: ./query_service
+    container_name: query-service
+    ports:
+      - "8002:8000"
+    env_file:
+      - .env
+    volumes:
+      - chroma_data:/chroma_data
+    environment:
+      - SEARCH_SERVICE_URL=${SEARCH_SERVICE_URL}
+    restart: unless-stopped
+    networks: [rag-net]
+
+  opensearch:
+    image: opensearchproject/opensearch:2.17.0
+    container_name: opensearch
+    environment:
+      - discovery.type=single-node
+      - OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m
+
+      # 🔐 Required for 2.12+ (otherwise it crashes)
+      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=${OPENSEARCH_INITIAL_ADMIN_PASSWORD}
+
+      # 🚫 Optional: disable security plugin COMPLETELY in local/dev
+      - DISABLE_SECURITY_PLUGIN=true
+
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+    ports:
+      - "9200:9200"
+    # ... any other config you already have
+    networks: [rag-net]
+
+  search-service:
+    build:
+      context: ./search_service
+    container_name: search-service
+    environment:
+      - OPENSEARCH_HOST=${OPENSEARCH_HOST}
+      - OPENSEARCH_PORT=${OPENSEARCH_PORT}
+      - OPENSEARCH_SCHEME=${OPENSEARCH_SCHEME}
+      - OPENSEARCH_USER=${OPENSEARCH_USER}
+      - OPENSEARCH_PASSWORD=${OPENSEARCH_PASSWORD}
+      - OPENSEARCH_INDEX=${OPENSEARCH_INDEX}
+    depends_on:
+      - opensearch
+    ports:
+      - "8003:8003"
+    
+    networks: [rag-net]
+
+  llm:
+    provider:
+      type: model
+      options:
+        model: qwen3
+
+  embeddings:
+    provider:
+      type: model
+      options:
+        model: qwen3-embedding:8B-Q4_K_M
+
+volumes:
+  chroma_data:
+  opensearch_data:
+
+
+networks:
+  rag-net:
+    name: rag-net

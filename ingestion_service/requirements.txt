@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+python-multipart
+pypdf
+chromadb
+requests
+openai
+dotenv
+chromadb>=0.4.24
+pypdf
+pytest
+opensearch-py==2.6.0

@@ -1,0 +1,217 @@
+
+
+# Rag_Micro — Architecture & Flow Q&A (50)
+
+1) Q: What is this project?
+   A: A microservice-based RAG (Retrieval-Augmented Generation) system that ingests documents and answers user questions with citations.
+
+2) Q: What is the main user entrypoint for asking questions?
+   A: `POST /query` on the query-service.
+
+3) Q: What is the main entrypoint for ingesting documents?
+   A: The ingest endpoint in the ingest-service (the service that chunks + embeds + stores documents).
+
+4) Q: What do we use as the vector database?
+   A: Chroma is used for vector storage and vector search.
+
+5) Q: What do we use for keyword/BM25 search?
+   A: OpenSearch (via the search-service) provides BM25 retrieval.
+
+6) Q: What is the OpenSearch index name used for BM25 in this project?
+   A: `docs_bm25` (set by `OPENSEARCH_INDEX=docs_bm25`).
+
+7) Q: What is “hybrid retrieval” in this system?
+   A: It combines BM25 (keyword search) with vector similarity, then expands around top “center” chunks using neighbors.
+
+8) Q: What is the high-level retrieval pipeline for a query?
+   A: BM25 candidate chunks → fetch those chunks from Chroma → score/fuse → pick centers → fetch neighbors → build context.
+
+9) Q: Why do we run BM25 first?
+   A: To quickly narrow the search space to text-relevant chunk candidates before vector scoring.
+
+10) Q: What is a “center chunk”?
+    A: A candidate chunk selected as a primary evidence anchor; neighbors are fetched around it to build contiguous context.
+
+11) Q: How do we fetch center chunks from Chroma?
+    A: By deterministic chunk IDs built from `(document_id, chunk_id)` (e.g., `make_chroma_chunk_id(did, cid)`).
+
+12) Q: How do we score center chunks?
+    A: We compute cosine similarity between query embedding and center embedding, then fuse it with BM25 score.
+
+13) Q: What controls the fusion weighting between cosine and BM25?
+    A: `HYBRID_FUSION_ALPHA` (alpha = cosine weight; 1-alpha = BM25 weight).
+
+14) Q: How do we keep only strong centers?
+    A: A relative threshold (`HYBRID_CENTER_REL_THRESHOLD`) filters centers to those close to the best score.
+
+15) Q: Do we guarantee the top BM25 hit is kept as a center?
+    A: Yes—logic “hard-keeps” BM25 #1 even if thresholding would drop it.
+
+16) Q: Why do we expand neighbors around centers?
+    A: To capture surrounding context that may be split across chunks (better for LLM grounding and citations).
+
+17) Q: What controls how many neighbors to fetch?
+    A: `HYBRID_NEIGHBOR_WINDOW` (e.g., window=2 means a range around the center).
+
+18) Q: What caps the total chunks returned to the LLM?
+    A: `HYBRID_MAX_CONTEXT_CHUNKS` caps stitched context chunks.
+
+19) Q: What caps the text length sent to the LLM?
+    A: The context builder caps characters (e.g., `max_chars=12000`).
+
+20) Q: What happens first in `POST /query`?
+    A: The user question is embedded via the embeddings endpoint (OpenAI-compatible client).
+
+21) Q: Where is the embedding model configured?
+    A: Via `MODEL_EMBED` environment variable.
+
+22) Q: Where is the chat/LLM model configured?
+    A: Via `MODEL_CHAT` (with a default like `ai/qwen3:latest`).
+
+23) Q: How does query-service talk to the embedding/LLM engine?
+    A: Using the OpenAI Python client against a custom `BASE_URL` (OpenAI-compatible server).
+
+24) Q: What happens after retrieval?
+    A: Retrieved chunks are formatted into a single context string and sent with the question to the LLM.
+
+25) Q: What does the query response include?
+    A: `answer`, `sources` (citations), `context_used` (context length), and `model_used`.
+
+26) Q: What is a “source” in the response?
+    A: Metadata for a cited chunk: `document_id`, `chunk_id`, optional `source` filename, `page`, and a short snippet.
+
+27) Q: How do we rank sources?
+    A: Primarily by `evidence_score` (or fallback scores), then dedupe by `(document_id, chunk_id)`.
+
+28) Q: What is `evidence_score`?
+    A: A score derived from the center score minus a distance penalty for neighbor chunks.
+
+29) Q: Why apply a distance penalty?
+    A: To prefer the center chunk over farther neighbors when ranking citations.
+
+30) Q: What controls the distance penalty?
+    A: `HYBRID_DISTANCE_PENALTY`.
+
+31) Q: What is the “numpy truthiness ambiguity” error we hit earlier?
+    A: Using `or []` on numpy arrays (e.g., `embs = got.get("embeddings", []) or []`) triggers “truth value is ambiguous.”
+
+32) Q: How do we avoid the numpy truthiness issue?
+    A: Never use boolean checks on arrays; convert safely using a helper like `_safe_list(x)`.
+
+33) Q: What is `_safe_list` used for?
+    A: Converting list/tuple/numpy-array-like results into a plain Python list safely.
+
+34) Q: What does the search-service do?
+    A: It exposes a `/search` endpoint that runs BM25 queries against OpenSearch and returns top hits.
+
+35) Q: What is a BM25 hit?
+    A: A tuple-like record containing `document_id`, `chunk_id`, `score`, plus content/metadata.
+
+36) Q: Why can “experience” questions match AWS slides?
+    A: Because BM25 can match generic phrases like “how much…” and some slide text contains “how much…”.
+
+37) Q: How did we ensure the cover letter is included for the “experience” query?
+    A: BM25 returns `cover latter::0`, and the hybrid center selection keeps BM25 #1 plus neighbors.
+
+38) Q: Why might the cover letter not show up in sources sometimes?
+    A: If it isn’t in the stitched context or it’s ranked lower than other chunks and top_k sources are filled first.
+
+39) Q: What is the purpose of `document_id` in queries?
+    A: It restricts retrieval to a single document (vector search inside that document only).
+
+40) Q: What happens when a `document_id` is provided?
+    A: The hybrid BM25 step is skipped and Chroma vector search is run within that document.
+
+41) Q: What is “chunking” in the ingest flow?
+    A: Splitting a document into smaller text segments (“chunks”) for embedding and retrieval.
+
+42) Q: Where is chunk size/overlap defined?
+    A: In the ingest pipeline configuration (often env vars or a chunker module); check ingest-service settings.
+
+43) Q: What is stored in Chroma for each chunk?
+    A: The chunk text, its embedding vector, and metadata like document_id, chunk_id, page, and source filename.
+
+44) Q: What is stored in OpenSearch for each chunk?
+    A: The chunk text and metadata needed for BM25 search (document_id, chunk_id, page/source).
+
+45) Q: What is the deterministic chunk ID format?
+    A: It is built by `make_chroma_chunk_id(document_id, chunk_id)` (commonly `"<document_id>::<chunk_id>"`).
+
+46) Q: What is neighbor retrieval?
+    A: Fetching chunks adjacent to a center chunk (e.g., chunk_id-2 … chunk_id+2) to form a wider context.
+
+47) Q: Why do we “dedupe” stitched chunks?
+    A: Multiple centers can overlap in neighbors; dedupe prevents repeated chunks and wasted context tokens.
+
+48) Q: What does “context_used” measure?
+    A: The number of characters in the final context string sent to the LLM.
+
+49) Q: What should happen when no relevant chunks are found?
+    A: The API returns “I don't know…” with empty sources.
+
+
+50) Q: What is the simplest way to validate the full RAG flow?
+    A: Ingest a document → verify it exists in Chroma + OpenSearch → run `POST /query` → confirm answer + correct citations.
+
+
+# Rag_Micro — Ingest Flow Q&A (20)
+
+51) Q: What is the ingest endpoint used for?
+    A: To accept an uploaded document, extract text, chunk it, embed the chunks, and persist them for retrieval.
+
+52) Q: What route ingests a document in the ingest service?
+    A: `POST /ingest`.
+
+53) Q: Which file types are currently allowed for ingest?
+    A: PDFs (`application/pdf`) and plain text (`text/plain`).
+
+54) Q: What happens if a user uploads an unsupported content type?
+    A: The API returns HTTP 400 with an “Unsupported content type” message.
+
+55) Q: How is `document_id` chosen if the user does not provide one?
+    A: It is derived from the uploaded filename stem (filename without extension).
+
+56) Q: Why do we `strip()` the `document_id`?
+    A: To avoid leading/trailing whitespace causing mismatched IDs across Chroma/OpenSearch.
+
+57) Q: What happens if the derived/provided `document_id` is empty?
+    A: The API returns HTTP 400: `document_id cannot be empty`.
+
+58) Q: How does the system extract text from a PDF?
+    A: `DocumentLoader.load_pages(file)` returns a list of `{page, text}` objects.
+
+59) Q: Why does the loader return page numbers?
+    A: So each chunk can be stored with its page metadata for accurate citations.
+
+60) Q: What chunking strategy is used right now?
+    A: Fixed-size overlapping chunks via `fixed_chunk_text()`.
+
+61) Q: What are the default chunking parameters?
+    A: `chunk_size=500` tokens (whitespace tokens) and `overlap=50`.
+
+62) Q: What happens if `overlap >= chunk_size`?
+    A: `fixed_chunk_text()` raises `ValueError("overlap must be smaller than chunk_size")`.
+
+63) Q: Is chunking tokenization model-based?
+    A: No—tokenization is whitespace-based (`text.split()`), not model tokenization.
+
+64) Q: How are chunks generated per page?
+    A: Each page’s text is chunked independently, and each chunk is paired with that page number.
+
+65) Q: What is `pages_for_chunks` used for?
+    A: It aligns each chunk with its originating page so `persist_chunks()` can store page metadata.
+
+66) Q: What happens if no chunks are produced?
+    A: The ingest route raises an error (e.g., `No chunks produced from document.`) and returns HTTP 400.
+
+67) Q: How are embeddings produced for chunks?
+    A: `embed_texts(all_chunks)` embeds all chunk texts in a batch.
+
+68) Q: Where are chunks and embeddings persisted?
+    A: In Chroma (vectors + metadata) and in OpenSearch (text + metadata) so hybrid retrieval can work.
+
+69) Q: What metadata must be stored to support hybrid retrieval?
+    A: At minimum `document_id`, `chunk_id`, `source` (filename), and `page` (or equivalent page field).
+
+70) Q: What must `persist_chunks()` guarantee for hybrid retrieval to work correctly?
+    A: Stable, deterministic chunk IDs (e.g., `"<document_id>::<chunk_id>"`) across both Chroma and OpenSearch so BM25 hits can be fetched by ID from Chroma.
